@@ -1,0 +1,6 @@
+.DS_Store
+.claude-harness/
+.idea/
+.vscode/
+*.log
+node_modules/

@@ -1,0 +1,93 @@
+# Reminds PR authors to include a Linear magic word.
+# Drop this file into any repo's .github/workflows/ directory.
+# Configure team prefixes at the top.
+#
+# SECURITY NOTE: This workflow reads PR body/title via context.payload.* in
+# actions/github-script (Node.js), not via ${{ }} interpolation in run: shell
+# commands. Untrusted PR content stays in JS variables and is only matched
+# against a regex — never spliced into a shell. This is the recommended safe
+# pattern per https://github.blog/security/vulnerability-research/how-to-catch-github-actions-workflow-injections-before-attackers-do/
+
+name: Validate Linear link
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      # Comma-separated Linear team prefixes accepted in this repo.
+      LINEAR_PREFIXES: HSOS,NEB,ENG
+      # Set to "true" to make a missing magic word a failing check.
+      ENFORCE: "false"
+
+    steps:
+      - name: Check for Linear magic word
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prefixes = (process.env.LINEAR_PREFIXES || '').split(',').map(p => p.trim()).filter(Boolean);
+            if (prefixes.length === 0) {
+              core.warning('LINEAR_PREFIXES is empty — skipping check.');
+              return;
+            }
+            const enforce = (process.env.ENFORCE || 'false').toLowerCase() === 'true';
+
+            // Read untrusted PR content via the API — values stay in JS, never reach a shell.
+            const prBody = context.payload.pull_request.body || '';
+            const prTitle = context.payload.pull_request.title || '';
+            const haystack = prBody + '\n' + prTitle;
+
+            const prefixGroup = prefixes.join('|');
+            const re = new RegExp(`\\b(Closes|Fixes|Resolves|Refs|Part of)\\s+(${prefixGroup})-\\d+\\b`, 'i');
+            const match = haystack.match(re);
+
+            if (match) {
+              core.info(`Found Linear magic word: ${match[0]}`);
+              return;
+            }
+
+            const reminder = [
+              '👋 Linear-Claude reminder',
+              '',
+              "I didn't see a Linear magic word in this PR's body or title.",
+              'If this PR corresponds to a Linear issue, add one of these on its own line in the body so Linear auto-attaches the PR:',
+              '',
+              '```',
+              `Closes ${prefixes[0]}-123    # closes the issue when merged`,
+              `Refs ${prefixes[0]}-123      # attaches without closing`,
+              '```',
+              '',
+              "If there's no matching Linear issue, ignore this — it's a soft reminder, not a gate.",
+              '',
+              '_Powered by [linear-claude](https://github.com/Screddyice/linear-claude)._'
+            ].join('\n');
+
+            // Only post once per PR.
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              per_page: 100,
+            });
+            const existing = comments.find(c => c.body && c.body.includes('Linear-Claude reminder'));
+            if (existing) {
+              core.info('Reminder already posted — skipping duplicate.');
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.payload.pull_request.number,
+                body: reminder,
+              });
+              core.info('Posted Linear-Claude reminder.');
+            }
+
+            if (enforce) {
+              core.setFailed('Linear magic word required (ENFORCE=true).');
+            }
