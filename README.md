@@ -125,3 +125,7 @@ Lives in production at [`teamnebula-ai/hyperscale`](https://github.com/teamnebul
 ## License
 
 MIT — see [LICENSE](./LICENSE).
+
+## CI
+
+`.woodpecker.yaml` runs `bash -n` and `shellcheck -S warning` on every `.sh` file, checks that the GitHub workflow YAML parses, and checks that each `SKILL.md` has front matter with a name and description. Pipelines run on Crow CI for every push and pull request; the check shows up on a PR as `ci/crow/pr/woodpecker`. There is no test suite, so a green check means the code parses and lints cleanly, not that it behaves correctly.

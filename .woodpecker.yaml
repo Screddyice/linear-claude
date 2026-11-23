@@ -1,0 +1,31 @@
+# Crow CI: fast static checks. This repo has no test suite, so the pipeline
+# only catches breakage that can be found without running the code.
+steps:
+  bash-syntax:
+    image: bash:5.2
+    commands:
+      - for f in $$(find . -name "*.sh" -not -path "./.git/*"); do echo "bash -n $$f"; bash -n "$$f"; done
+  shellcheck:
+    image: koalaman/shellcheck-alpine:v0.10.0
+    commands:
+      - shellcheck -S warning $$(find . -name "*.sh" -not -path "./.git/*")
+  yaml-parse:
+    image: python:3.12-slim
+    commands:
+      - pip install --no-cache-dir --quiet pyyaml==6.0.2
+      - |
+        python - <<'PY'
+        import pathlib, yaml
+        for p in sorted(pathlib.Path(".github/workflows").glob("*.yml")):
+            yaml.safe_load(p.read_text())
+            print("parses:", p)
+        for p in sorted(pathlib.Path("skills").glob("*/SKILL.md")):
+            text = p.read_text()
+            assert text.startswith("---\n"), f"{p}: missing front matter"
+            meta = yaml.safe_load(text.split("---\n", 2)[1])
+            for key in ("name", "description"):
+                assert meta.get(key), f"{p}: front matter has no {key}"
+            print("front matter ok:", p)
+        PY
+when:
+  event: [push, pull_request, manual]
