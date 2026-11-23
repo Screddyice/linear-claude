@@ -1,0 +1,99 @@
+# GitHub CI is the fallback for Crow CI. It runs the same checks as
+# .woodpecker.yaml (same images and tool versions) only when Crow never saw the
+# commit, or when someone starts it by hand.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Crow CI on Shawn's Mac is the primary check. Crow posts a ci/crow/... status
+  # within seconds of receiving a push, so this job waits up to 3 minutes for one.
+  # If it appears, the jobs below are skipped and Crow's result is the merge check.
+  # If not (Mac asleep or offline, so the webhook was lost), the jobs below run as
+  # the standard GitHub CI. A manual run (workflow_dispatch) always runs them.
+  crow-gate:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      statuses: read
+    outputs:
+      run: ${{ steps.check.outputs.run }}
+    steps:
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" = workflow_dispatch ]; then
+            echo "Manual run: running GitHub CI."; echo run=true >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          for _ in $(seq 1 12); do
+            n=$(gh api "repos/$GITHUB_REPOSITORY/commits/$SHA/statuses" \
+              --jq '[.[] | select(.context | startswith("ci/crow/"))] | length' || echo 0)
+            if [ "${n:-0}" -gt 0 ]; then
+              echo "Crow picked up $SHA; skipping GitHub CI (Crow's status is the check)."
+              echo run=false >> "$GITHUB_OUTPUT"; exit 0
+            fi
+            sleep 15
+          done
+          echo "No Crow status on $SHA after 3 minutes (Mac asleep or offline); running GitHub CI."
+          echo run=true >> "$GITHUB_OUTPUT"
+
+  bash-syntax:
+    needs: crow-gate
+    if: needs.crow-gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - run: |
+          find . -name "*.sh" -not -path "./.git/*" -print0 | while IFS= read -r -d '' f; do echo "bash -n $f"; bash -n "$f"; done
+
+  shellcheck:
+    needs: crow-gate
+    if: needs.crow-gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - run: |
+          docker run --rm -v "$PWD:/mnt" -w /mnt koalaman/shellcheck-alpine:v0.10.0 \
+            sh -c 'shellcheck -S warning $(find . -name "*.sh" -not -path "./.git/*")'
+
+  yaml-parse:
+    needs: crow-gate
+    if: needs.crow-gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    container: python:3.12-slim
+    steps:
+      - uses: actions/checkout@v5
+      - run: |
+          pip install --no-cache-dir --quiet pyyaml==6.0.2
+          python - <<'PY'
+          import pathlib, yaml
+          for p in sorted(pathlib.Path(".github/workflows").glob("*.yml")):
+              yaml.safe_load(p.read_text())
+              print("parses:", p)
+          for p in sorted(pathlib.Path("skills").glob("*/SKILL.md")):
+              text = p.read_text()
+              assert text.startswith("---\n"), f"{p}: missing front matter"
+              meta = yaml.safe_load(text.split("---\n", 2)[1])
+              for key in ("name", "description"):
+                  assert meta.get(key), f"{p}: front matter has no {key}"
+              print("front matter ok:", p)
+          PY
